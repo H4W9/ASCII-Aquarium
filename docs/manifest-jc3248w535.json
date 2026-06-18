@@ -1,13 +1,13 @@
 {
   "name": "ASCII Aquarium jc3248w535",
-  "version": "2.30_JC",
+  "version": "2.33_JC",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "firmware/ascii-aquarium-jc3248w535-v2.30_JC-merged.bin",
+          "path": "firmware/ascii-aquarium-jc3248w535-v2.33_JC-merged.bin",
           "offset": 0
         }
       ]
