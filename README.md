@@ -149,7 +149,7 @@ Also, we have preliminary support for the much nicer [JC3248w535 board](https://
 
 ## New Features in 2.39 ><((((>`
 
-[Detailed Release Notes for 2.39 can be found here](https://github.com/POWER-PILL/ASCII-Aquarium/blob/main/ASCII_Aquarium_Release_Notes_v2.20.md).
+[Detailed Release Notes for 2.39 can be found here](https://github.com/POWER-PILL/ASCII-Aquarium/blob/main/ASCII_Aquarium_Release_Notes_v2.39.md).
 
 - Added **Auto Sky**, a clock-driven background mode that slowly blends the aquarium gradient through sunrise, day, sunset, and night colours.
 - Added editable Auto Sky colour slots for **Sunrise**, **Day**, **Sunset**, and **Night**.
