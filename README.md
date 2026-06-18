@@ -147,6 +147,24 @@ Also, we have preliminary support for the much nicer [JC3248w535 board](https://
   </tr>
 </table>
 
+## New Features in 2.39 ><((((>`
+
+[Detailed Release Notes for 2.39 can be found here](https://github.com/POWER-PILL/ASCII-Aquarium/blob/main/ASCII_Aquarium_Release_Notes_v2.20.md).
+
+- Added **Auto Sky**, a clock-driven background mode that slowly blends the aquarium gradient through sunrise, day, sunset, and night colours.
+- Added editable Auto Sky colour slots for **Sunrise**, **Day**, **Sunset**, and **Night**.
+- Moved **Flip Display** into Tank settings
+- Added **Rainbow** colour cycling for gradient backgrounds, clock colour, and ambient RGB lighting.
+- Shared the rainbow-capable colour picker across background, clock, and ambient-light colour selection.
+- Added a rare **Cthulhu octopus** variant because apparently the tank needed one more thing with too many feelings and tentacles.
+- Added a compact orange **snail** that crawls along the tank floor.
+- Added an animated **jellyfish** with slow bobbing and tentacle motion.
+- Added timed-event controls for **Snail** and **Jellyfish** appearances.
+- Tuned creature proportions, placement, and layering so the little critters feel more like tank residents and less like ASCII furniture.
+- Lowered the large ASCII clock slightly so it sits more naturally behind the action.
+- Trimmed the colour picker swatch grid so it stays compact
+
+
 ## Basic Controls ><((((*>
 
 
