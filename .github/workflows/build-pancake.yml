@@ -1,0 +1,78 @@
+name: Build ASCII Aquarium (Pancake)
+
+# Compiles the Marauder Pancake port (ESP32-C5 / ST7796 / FT6336) against the
+# H4W9 ESP32-C5 fork of TFT_eSPI and publishes the firmware binaries as an
+# artifact. Run manually from the Actions tab, or on pushes that touch the port.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ASCII_Aquarium_Pancake/**'
+      - '.github/workflows/build-pancake.yml'
+
+env:
+  # ESP32 Arduino core version (needs C5 support; bump if a newer one is required).
+  ESP32_CORE_VERSION: '3.3.0'
+  # TFT_eSPI fork + branch to build against.
+  TFT_ESPI_REPO: 'https://github.com/H4W9/TFT_eSPI.git'
+  TFT_ESPI_BRANCH: 'ESP32-C5'
+  SKETCH_DIR: 'ASCII_Aquarium_Pancake'
+  FQBN: 'esp32:esp32:esp32c5'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core (with C5 support)
+        run: |
+          arduino-cli config init --additional-urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      - name: Install TFT_eSPI (H4W9 ESP32-C5 fork) into the sketchbook
+        run: |
+          LIB_DIR="$(arduino-cli config get directories.user)/libraries"
+          mkdir -p "$LIB_DIR"
+          rm -rf "$LIB_DIR/TFT_eSPI"
+          git clone --depth 1 --branch "${TFT_ESPI_BRANCH}" "${TFT_ESPI_REPO}" "$LIB_DIR/TFT_eSPI"
+          echo "TFT_LIB_DIR=$LIB_DIR/TFT_eSPI" >> "$GITHUB_ENV"
+
+      - name: Select the Pancake TFT_eSPI setup
+        run: |
+          # Guarantee the Pancake ST7796/C5 setup is present and selected, whatever
+          # the fork's default User_Setup_Select.h happens to point at.
+          cp "${SKETCH_DIR}/User_Setup_marauder_pancake.h" \
+             "${TFT_LIB_DIR}/User_Setup_marauder_pancake.h"
+          printf '#include <User_Setup_marauder_pancake.h>\n' \
+             > "${TFT_LIB_DIR}/User_Setup_Select.h"
+          echo "----- active User_Setup_Select.h -----"
+          cat "${TFT_LIB_DIR}/User_Setup_Select.h"
+
+      - name: Show board options (for debugging option keys)
+        run: arduino-cli board details --fqbn "${FQBN}" || true
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn "${FQBN}" \
+            --board-options "PartitionScheme=huge_app,PSRAM=enabled" \
+            --export-binaries \
+            --warnings none \
+            "${SKETCH_DIR}"
+
+      - name: Upload firmware binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascii-aquarium-pancake-${{ github.sha }}
+          path: |
+            ${{ env.SKETCH_DIR }}/build/**/*.bin
+            ${{ env.SKETCH_DIR }}/build/**/*.elf
+          if-no-files-found: error
