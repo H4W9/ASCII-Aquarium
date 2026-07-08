@@ -79,9 +79,10 @@ What it does:
 1. Installs Arduino CLI + the ESP32 core (`ESP32_CORE_VERSION`, default `3.3.0`).
 2. `git clone --branch ESP32-C5` of the TFT_eSPI fork into the sketchbook.
 3. Forces the Pancake ST7796/C5 setup by copying
-   `User_Setup_marauder_pancake.h` into the library and pointing
-   `User_Setup_Select.h` at it — so the build is deterministic regardless of the
-   fork's default setup selection.
+   `User_Setup_marauder_pancake.h` in as the library's default `User_Setup.h`
+   (the file the fork's `User_Setup_Select.h` already loads by default). The
+   Select header is left untouched because it also carries the driver-defines
+   dispatch that pulls in `TFT_Drivers/ST7796_Defines.h`.
 4. Compiles for `esp32:esp32:esp32c5` (`PartitionScheme=huge_app,PSRAM=enabled`).
 5. Uploads the binaries as artifact `ascii-aquarium-pancake-<sha>`.
 

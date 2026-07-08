@@ -47,14 +47,16 @@ jobs:
 
       - name: Select the Pancake TFT_eSPI setup
         run: |
-          # Guarantee the Pancake ST7796/C5 setup is present and selected, whatever
-          # the fork's default User_Setup_Select.h happens to point at.
-          cp "${SKETCH_DIR}/User_Setup_marauder_pancake.h" \
-             "${TFT_LIB_DIR}/User_Setup_marauder_pancake.h"
-          printf '#include <User_Setup_marauder_pancake.h>\n' \
-             > "${TFT_LIB_DIR}/User_Setup_Select.h"
-          echo "----- active User_Setup_Select.h -----"
-          cat "${TFT_LIB_DIR}/User_Setup_Select.h"
+          # This fork's User_Setup_Select.h contains the driver-defines dispatch
+          # (the block that #includes TFT_Drivers/ST7796_Defines.h). Do NOT replace
+          # that file, or the ST7796 command set (TFT_CASET, TFT_MADCTL, ...) never
+          # loads. Instead, drop our config in as the library's default User_Setup.h,
+          # which the unmodified Select header already loads by default.
+          cp "${SKETCH_DIR}/User_Setup_marauder_pancake.h" "${TFT_LIB_DIR}/User_Setup.h"
+          echo "----- active includes in User_Setup_Select.h -----"
+          grep -nE '^\s*#include' "${TFT_LIB_DIR}/User_Setup_Select.h" || true
+          echo "----- driver line in the installed User_Setup.h -----"
+          grep -nE '^\s*#define\s+(ST7796_DRIVER|ILI9341_DRIVER)' "${TFT_LIB_DIR}/User_Setup.h" || true
 
       - name: Show board options (for debugging option keys)
         run: arduino-cli board details --fqbn "${FQBN}" || true
