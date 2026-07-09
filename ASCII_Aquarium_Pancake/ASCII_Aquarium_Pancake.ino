@@ -23,7 +23,18 @@
 #else
 #include "ft6336_touch.h"          // FT6336 capacitive touch over I2C
 #endif
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#include "esp_wifi.h"              // esp_wifi_set_band_mode() — C5 is dual-band 2.4/5 GHz
+#endif
 #include <time.h>
+
+// The ESP32-C5 is dual-band (2.4 + 5 GHz). Keep both bands enabled and let the
+// scan/connect logic pick the best AP. Combined-SSID connect reliability comes
+// from targeting the exact BSSID + channel the scan found (see startWifiConnectTo),
+// not from disabling a band. Set _2G_ONLY or _5G_ONLY here to force a band.
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#define AQUARIUM_WIFI_BAND_MODE WIFI_BAND_MODE_AUTO
+#endif
 
 /*
   Desktop ASCII Aquarium — Marauder Pancake port
@@ -1452,8 +1463,20 @@ char wifiPasswordBuffer[WIFI_PASS_MAX_LEN + 1] = "";
 char wifiNetworkNames[MAX_WIFI_NETWORKS][WIFI_SSID_MAX_LEN + 1];
 int wifiNetworkRssi[MAX_WIFI_NETWORKS];
 bool wifiNetworkOpen[MAX_WIFI_NETWORKS];
+uint8_t wifiNetworkBssid[MAX_WIFI_NETWORKS][6];  // BSSID of the strongest AP per SSID
+uint8_t wifiNetworkChannel[MAX_WIFI_NETWORKS];   // its channel (encodes the band: >14 = 5 GHz)
 int wifiNetworkCount = 0;
 int wifiNetworkPage = 0;
+// AP the user picked in the list — carried through the password prompt to connect.
+uint8_t pendingWifiBssid[6];
+uint8_t pendingWifiChannel = 0;
+bool pendingWifiHasBssid = false;
+// AP we actually associated with, remembered so reconnects target the same
+// BSSID/band instead of re-guessing on a combined 2.4/5 GHz SSID.
+char lastGoodSsid[WIFI_SSID_MAX_LEN + 1] = "";
+uint8_t lastGoodBssid[6];
+uint8_t lastGoodChannel = 0;
+bool lastGoodValid = false;
 unsigned long wifiConnectStartMs = 0;
 unsigned long wifiLastReconnectMs = 0;
 unsigned long wifiLastNtpAttemptMs = 0;
@@ -3627,6 +3650,14 @@ const char* internetTimeStatus() {
 void ensureWifiRadioStarted() {
   if (wifiRadioStarted) return;
   WiFi.mode(WIFI_STA);
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+  // Force the band before scanning/connecting so combined 2.4/5 GHz SSIDs
+  // associate on the reliable band instead of timing out on 5 GHz.
+  esp_err_t bandErr = esp_wifi_set_band_mode(AQUARIUM_WIFI_BAND_MODE);
+  if (bandErr != ESP_OK) {
+    Serial.printf("[WiFi] esp_wifi_set_band_mode failed: %d\n", (int)bandErr);
+  }
+#endif
   WiFi.setSleep(false);
   wifiRadioStarted = true;
 }
@@ -3638,14 +3669,16 @@ void clearWifiScanResults() {
     wifiNetworkNames[i][0] = '\0';
     wifiNetworkRssi[i] = 0;
     wifiNetworkOpen[i] = false;
+    wifiNetworkChannel[i] = 0;
+    memset(wifiNetworkBssid[i], 0, 6);
   }
 }
 
-bool wifiSsidAlreadyListed(const char* ssid) {
+int wifiFindListed(const char* ssid) {
   for (int i = 0; i < wifiNetworkCount; ++i) {
-    if (strncmp(wifiNetworkNames[i], ssid, WIFI_SSID_MAX_LEN) == 0) return true;
+    if (strncmp(wifiNetworkNames[i], ssid, WIFI_SSID_MAX_LEN) == 0) return i;
   }
-  return false;
+  return -1;
 }
 
 void startWifiScan() {
@@ -3677,14 +3710,34 @@ void finishWifiScanIfReady() {
     return;
   }
 
-  for (int i = 0; i < scanResult && wifiNetworkCount < MAX_WIFI_NETWORKS; ++i) {
+  // A combined 2.4/5 GHz SSID shows up as one scan entry per band. Keep a single
+  // list row per name but remember the strongest AP's BSSID/channel, so tapping
+  // the name connects to whichever band has the better signal.
+  for (int i = 0; i < scanResult; ++i) {
     String ssid = WiFi.SSID(i);
     if (ssid.length() == 0) continue;
-    if (wifiSsidAlreadyListed(ssid.c_str())) continue;
+    int rssi = WiFi.RSSI(i);
+    int channel = WiFi.channel(i);
+    bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    const uint8_t* bssid = WiFi.BSSID(i);
+
+    int existing = wifiFindListed(ssid.c_str());
+    if (existing >= 0) {
+      if (rssi > wifiNetworkRssi[existing]) {   // stronger AP for this SSID → prefer it
+        wifiNetworkRssi[existing] = rssi;
+        wifiNetworkChannel[existing] = (uint8_t)channel;
+        wifiNetworkOpen[existing] = isOpen;
+        if (bssid) memcpy(wifiNetworkBssid[existing], bssid, 6);
+      }
+      continue;
+    }
+    if (wifiNetworkCount >= MAX_WIFI_NETWORKS) continue;
 
     copySafe(wifiNetworkNames[wifiNetworkCount], sizeof(wifiNetworkNames[wifiNetworkCount]), ssid.c_str());
-    wifiNetworkRssi[wifiNetworkCount] = WiFi.RSSI(i);
-    wifiNetworkOpen[wifiNetworkCount] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    wifiNetworkRssi[wifiNetworkCount] = rssi;
+    wifiNetworkChannel[wifiNetworkCount] = (uint8_t)channel;
+    wifiNetworkOpen[wifiNetworkCount] = isOpen;
+    if (bssid) memcpy(wifiNetworkBssid[wifiNetworkCount], bssid, 6);
     wifiNetworkCount++;
   }
 
@@ -3720,7 +3773,11 @@ bool syncClockFromSystemTime(bool markDirty) {
   return true;
 }
 
-void startWifiConnect(const char* ssid, const char* pass, bool savePendingCredentials) {
+// Connect, optionally targeting a specific AP. Passing channel>0 + bssid locks
+// association to that exact access point (used for scan-selected networks and
+// remembered reconnects); otherwise falls back to a plain SSID connect.
+void startWifiConnectTo(const char* ssid, const char* pass, bool savePendingCredentials,
+                        int channel, const uint8_t* bssid) {
   if (!wifiEnabled || !ssid || ssid[0] == '\0') return;
   ensureWifiRadioStarted();
   copySafe(pendingWifiSsid, sizeof(pendingWifiSsid), ssid);
@@ -3732,10 +3789,33 @@ void startWifiConnect(const char* ssid, const char* pass, bool savePendingCreden
   wifiTimeSynced = false;
   wifiConnectStartMs = millis();
   wifiLastReconnectMs = wifiConnectStartMs;
+
+  // Resolve the AP to target: explicit (from the scan list) wins; otherwise reuse
+  // the AP we last associated with for this SSID so reconnects stay on that band.
+  const uint8_t* useBssid = nullptr;
+  int useChannel = 0;
+  if (bssid && channel > 0) {
+    useBssid = bssid;
+    useChannel = channel;
+  } else if (lastGoodValid && strncmp(ssid, lastGoodSsid, WIFI_SSID_MAX_LEN) == 0) {
+    useBssid = lastGoodBssid;
+    useChannel = lastGoodChannel;
+  }
+
   WiFi.disconnect(false);
-  WiFi.begin(pendingWifiSsid, pendingWifiPass);
+  if (useBssid) {
+    WiFi.begin(pendingWifiSsid, pendingWifiPass, useChannel, useBssid, true);
+  } else {
+    WiFi.begin(pendingWifiSsid, pendingWifiPass);
+  }
   lastWifiServiceMs = 0;
   setWifiStatus("Connecting...");
+}
+
+// Reconnect / saved-network entry point: no explicit AP, so it reuses the
+// remembered BSSID for this SSID (if any) inside startWifiConnectTo.
+void startWifiConnect(const char* ssid, const char* pass, bool savePendingCredentials) {
+  startWifiConnectTo(ssid, pass, savePendingCredentials, 0, nullptr);
 }
 
 void setWifiEnabled(bool enabled) {
@@ -3821,6 +3901,14 @@ void serviceWifi(unsigned long now) {
       wifiConnected = true;
       wifiConnecting = false;
       wifiConnectionFailed = false;
+      // Remember the AP we actually associated with so later reconnects target
+      // the same BSSID/band instead of re-guessing on a combined 2.4/5 GHz SSID.
+      if (const uint8_t* b = WiFi.BSSID()) {
+        memcpy(lastGoodBssid, b, 6);
+        lastGoodChannel = (uint8_t)WiFi.channel();
+        copySafe(lastGoodSsid, sizeof(lastGoodSsid), pendingWifiSsid);
+        lastGoodValid = true;
+      }
       if (wifiSavePendingCredentials) {
         copySafe(wifiSsid, sizeof(wifiSsid), pendingWifiSsid);
         copySafe(wifiPass, sizeof(wifiPass), pendingWifiPass);
@@ -3847,15 +3935,32 @@ void serviceWifi(unsigned long now) {
       wifiConnecting = false;
       wifiConnectionFailed = true;
       wifiSavePendingCredentials = false;
+      // The remembered AP may have roamed/changed band; drop it so the next
+      // reconnect attempt falls back to a plain scan-and-connect.
+      lastGoodValid = false;
       WiFi.disconnect(false);
       setWifiStatus("Connect failed");
     }
     return;
   }
 
-  if (wifiSsid[0] != '\0' && (wifiLastReconnectMs == 0 || now - wifiLastReconnectMs >= WIFI_RECONNECT_DELAY_MS)) {
-    startWifiConnect(wifiSsid, wifiPass, false);
-  } else if (wifiSsid[0] == '\0' && !wifiScanInProgress && wifiNetworkCount == 0) {
+  if (wifiScanInProgress) return;   // let an in-flight scan finish before (re)connecting
+
+  if (wifiSsid[0] != '\0') {
+    if (wifiLastReconnectMs == 0 || now - wifiLastReconnectMs >= WIFI_RECONNECT_DELAY_MS) {
+      int idx = wifiFindListed(wifiSsid);
+      if (idx >= 0) {
+        // Found our saved network in the scan — target its strongest AP/band.
+        startWifiConnectTo(wifiSsid, wifiPass, false, wifiNetworkChannel[idx], wifiNetworkBssid[idx]);
+      } else if (lastGoodValid || wifiNetworkCount > 0) {
+        // Reuse the remembered AP, or (scanned but not seen) fall back to plain connect.
+        startWifiConnect(wifiSsid, wifiPass, false);
+      } else {
+        // Cold boot with no scan data yet: discover the AP's band/BSSID first.
+        startWifiScan();
+      }
+    }
+  } else if (wifiNetworkCount == 0) {
     startWifiScan();
   }
 }
@@ -6571,7 +6676,8 @@ void handleWifiPasswordTouch(int x, int y) {
     return;
   }
   if (inside(x, y, WIFI_PANEL_X + 226, WIFI_KEYBOARD_ACTION_Y, 76, 22)) {
-    startWifiConnect(pendingWifiSsid, wifiPasswordBuffer, true);
+    startWifiConnectTo(pendingWifiSsid, wifiPasswordBuffer, true,
+                       pendingWifiChannel, pendingWifiHasBssid ? pendingWifiBssid : nullptr);
     wifiPanelMode = WIFI_PANEL_MAIN;
     return;
   }
@@ -6610,10 +6716,15 @@ void handleWifiNetworksTouch(int x, int y) {
   if (index < 0 || index >= wifiNetworkCount) return;
 
   copySafe(pendingWifiSsid, sizeof(pendingWifiSsid), wifiNetworkNames[index]);
+  // Capture the selected AP's BSSID/channel so we connect to that exact access
+  // point (and the correct band) after the password prompt.
+  memcpy(pendingWifiBssid, wifiNetworkBssid[index], 6);
+  pendingWifiChannel = wifiNetworkChannel[index];
+  pendingWifiHasBssid = true;
   wifiPasswordBuffer[0] = '\0';
   keyboardMode = KEYBOARD_LOWER;
   if (wifiNetworkOpen[index]) {
-    startWifiConnect(pendingWifiSsid, "", true);
+    startWifiConnectTo(pendingWifiSsid, "", true, pendingWifiChannel, pendingWifiBssid);
     wifiPanelMode = WIFI_PANEL_MAIN;
   } else {
     wifiPanelMode = WIFI_PANEL_PASSWORD;

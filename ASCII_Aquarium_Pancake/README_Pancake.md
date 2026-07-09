@@ -112,6 +112,32 @@ static const bool CAP_TOUCH_INVERT_Y = false;  // short (320) axis
 The **Flip Display** option (Tank settings) also swaps the whole scene between
 TFT rotation 1 and 3; touch follows it automatically.
 
+## Wi-Fi (dual-band ESP32-C5)
+
+The C5 is a **dual-band 2.4/5 GHz** part, unlike the classic ESP32 this sketch
+was written for. The stock code just called `WiFi.begin(ssid, pass)` and let the
+chip pick an AP — on a **combined 2.4/5 GHz SSID** it could latch onto the 5 GHz
+side and time out, which looked like a plain "Connecting…" failure even with the
+right password.
+
+The port keeps **both bands enabled** and makes connecting reliable by targeting
+a specific access point:
+
+- `ensureWifiRadioStarted()` sets `esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO)`
+  so scans cover 2.4 **and** 5 GHz. (Change `AQUARIUM_WIFI_BAND_MODE` near the top
+  of the `.ino` to `_2G_ONLY` / `_5G_ONLY` to force a band.)
+- The scan collapses a combined SSID to one list row but remembers the **strongest
+  AP's BSSID + channel**, so tapping the name connects to whichever band has the
+  better signal — you get 5 GHz when you're close to it, 2.4 GHz otherwise.
+- Connecting uses `WiFi.begin(ssid, pass, channel, bssid)` to associate with that
+  exact AP instead of re-guessing the band.
+- The AP you actually associate with is remembered, so **reconnects** target the
+  same BSSID/band. If that AP has roamed/changed, the remembered target is dropped
+  after a timeout and the next attempt falls back to a plain scan-and-connect.
+
+If a connect still fails, open the serial monitor — the code logs the band-mode
+result and connection status.
+
 ## SD-card capture
 
 Screenshots / frame sequences (BMP) save to the SD card over the shared FSPI
