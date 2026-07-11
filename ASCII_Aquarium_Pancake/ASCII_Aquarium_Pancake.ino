@@ -34,6 +34,10 @@
 // not from disabling a band. Set _2G_ONLY or _5G_ONLY here to force a band.
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 #define AQUARIUM_WIFI_BAND_MODE WIFI_BAND_MODE_AUTO
+// Regulatory domain for association. ieee80211d makes the STA follow the AP's
+// advertised country, so this is mostly a starting point — set it to your
+// region if you like ("CA", "US", "GB", ...).
+#define AQUARIUM_WIFI_COUNTRY "US"
 #endif
 
 /*
@@ -3647,15 +3651,50 @@ const char* internetTimeStatus() {
   return wifiTimeSynced ? "Synced" : "Syncing";
 }
 
+#if defined(AQUARIUM_BOARD_PANCAKE)
+// Log association/DHCP events so a failing connect tells us WHY. The disconnect
+// "reason" code is the key diagnostic:
+//   2/15/205 = auth/handshake (wrong password or PMF/WPA3 mismatch)
+//   201      = AP not found (channel/band/regulatory: AP not usable on this band)
+//   203/204  = assoc/handshake fail
+//   200      = beacon timeout (out of range)
+void onAquariumWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf("[WiFi] assoc OK, channel %u\n", (unsigned)WiFi.channel());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[WiFi] disconnected, reason=%d\n",
+                    (int)info.wifi_sta_disconnected.reason);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("[WiFi] got IP %s\n", WiFi.localIP().toString().c_str());
+      break;
+    default:
+      break;
+  }
+}
+#endif
+
 void ensureWifiRadioStarted() {
   if (wifiRadioStarted) return;
+#if defined(AQUARIUM_BOARD_PANCAKE)
+  WiFi.onEvent(onAquariumWifiEvent);
+#endif
   WiFi.mode(WIFI_STA);
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
-  // Force the band before scanning/connecting so combined 2.4/5 GHz SSIDs
-  // associate on the reliable band instead of timing out on 5 GHz.
+  // Enable both bands (2.4 + 5 GHz) — reliability comes from BSSID/channel
+  // targeting in startWifiConnectTo(), not from disabling a band.
   esp_err_t bandErr = esp_wifi_set_band_mode(AQUARIUM_WIFI_BAND_MODE);
   if (bandErr != ESP_OK) {
     Serial.printf("[WiFi] esp_wifi_set_band_mode failed: %d\n", (int)bandErr);
+  }
+  // Set a regulatory domain so 5 GHz (and 2.4 GHz ch 12/13) channels are usable
+  // for association. ieee80211d=true makes the STA follow the AP's advertised
+  // country, so this works across regions. Marauder sets country explicitly too.
+  esp_err_t ctryErr = esp_wifi_set_country_code(AQUARIUM_WIFI_COUNTRY, true);
+  if (ctryErr != ESP_OK) {
+    Serial.printf("[WiFi] esp_wifi_set_country_code failed: %d\n", (int)ctryErr);
   }
 #endif
   WiFi.setSleep(false);
@@ -3803,6 +3842,12 @@ void startWifiConnectTo(const char* ssid, const char* pass, bool savePendingCred
   }
 
   WiFi.disconnect(false);
+#if defined(AQUARIUM_BOARD_PANCAKE)
+  Serial.printf("[WiFi] connecting '%s' (%s%s ch=%d, pw %d chars)\n",
+                pendingWifiSsid, useBssid ? "targeted" : "plain",
+                (useBssid && useChannel > 14) ? " 5GHz" : (useBssid ? " 2.4GHz" : ""),
+                useChannel, (int)strlen(pendingWifiPass));
+#endif
   if (useBssid) {
     WiFi.begin(pendingWifiSsid, pendingWifiPass, useChannel, useBssid, true);
   } else {
