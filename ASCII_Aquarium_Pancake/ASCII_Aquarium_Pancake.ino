@@ -3829,30 +3829,20 @@ void startWifiConnectTo(const char* ssid, const char* pass, bool savePendingCred
   wifiConnectStartMs = millis();
   wifiLastReconnectMs = wifiConnectStartMs;
 
-  // Resolve the AP to target: explicit (from the scan list) wins; otherwise reuse
-  // the AP we last associated with for this SSID so reconnects stay on that band.
-  const uint8_t* useBssid = nullptr;
-  int useChannel = 0;
-  if (bssid && channel > 0) {
-    useBssid = bssid;
-    useChannel = channel;
-  } else if (lastGoodValid && strncmp(ssid, lastGoodSsid, WIFI_SSID_MAX_LEN) == 0) {
-    useBssid = lastGoodBssid;
-    useChannel = lastGoodChannel;
-  }
+  // ESP32-C5: associate with a plain WiFi.begin() and let the supplicant pick the
+  // band — esp_wifi_set_band_mode(AUTO) is set in ensureWifiRadioStarted(). Pinning
+  // the BSSID/channel from a scan proved unreliable on the C5: a stale or cross-band
+  // target makes association fail. The scan now only feeds the network picker, not
+  // the connect. (This mirrors the FlipperHTTP ESP32-C5 approach used in FlipSocial.)
+  (void)channel;
+  (void)bssid;
 
   WiFi.disconnect(false);
 #if defined(AQUARIUM_BOARD_PANCAKE)
-  Serial.printf("[WiFi] connecting '%s' (%s%s ch=%d, pw %d chars)\n",
-                pendingWifiSsid, useBssid ? "targeted" : "plain",
-                (useBssid && useChannel > 14) ? " 5GHz" : (useBssid ? " 2.4GHz" : ""),
-                useChannel, (int)strlen(pendingWifiPass));
+  Serial.printf("[WiFi] connecting '%s' (pw %d chars)\n",
+                pendingWifiSsid, (int)strlen(pendingWifiPass));
 #endif
-  if (useBssid) {
-    WiFi.begin(pendingWifiSsid, pendingWifiPass, useChannel, useBssid, true);
-  } else {
-    WiFi.begin(pendingWifiSsid, pendingWifiPass);
-  }
+  WiFi.begin(pendingWifiSsid, pendingWifiPass);
   lastWifiServiceMs = 0;
   setWifiStatus("Connecting...");
 }
