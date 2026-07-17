@@ -87,13 +87,44 @@ What it does:
 5. Uploads the binaries as artifact `ascii-aquarium-pancake-<sha>`.
 
 To run it: push this folder + the workflow to `H4W9/ASCII-Aquarium`, then either
-push a change under `ASCII_Aquarium_Pancake/` or trigger it manually from the
-repo's **Actions → Build ASCII Aquarium (Pancake) → Run workflow**. Download the
-firmware from the run's **Artifacts** section.
+push to `main` or trigger it manually from the repo's **Actions → Build ASCII
+Aquarium (Pancake) → Run workflow**. Download the firmware from the run's
+**Artifacts** section (`bin-pancake`).
 
 Knobs live in the workflow's `env:` block (core version, TFT_eSPI repo/branch).
 If the ESP32 core rejects a `--board-options` key, the **Show board options**
 step in the log lists the valid keys for your core version.
+
+### Optional release
+
+Following the same template as `ESP32_FlipSocial`, the workflow can cut a GitHub
+release. It triggers on either:
+
+- a **`v*` tag push**, or
+- a **manual run with `release` = true** (Actions → Run workflow → tick the box).
+
+The release job downloads the build artifacts and publishes them with `gh release
+create`, deleting/refreshing an existing release of the same tag. Binaries follow
+the template naming, with the version read from `kSketchVersionLabel` in the `.ino`:
+
+```
+ASCII_Aquarium_v2_39_pancake.bin   # the app
+ASCII_Aquarium_bootloader.bin
+ASCII_Aquarium_partitions.bin
+ASCII_Aquarium_merged.bin          # single-file image, if the core emits one
+```
+
+**Tag naming — one deliberate difference from the FlipSocial template.** This repo
+is a fork of `POWER-PILL/ASCII-Aquarium`, which already ships tags `v2.20` / `v2.39`.
+Releasing at a bare `v2.39` would reuse the *upstream* tag (pointing at upstream's
+commit) and silently ignore `--target`. So the release tag is suffixed:
+
+```
+v<version>-pancake      →   v2.39-pancake
+```
+
+Change `TAG=` in the workflow's *Create / refresh release* step if you want a
+different scheme.
 
 ## Touch orientation tuning
 
