@@ -22,6 +22,7 @@
 #include <XPT2046_Touchscreen.h>   // resistive touch (CYD / ST7796U); Pancake uses I2C FT6336
 #else
 #include "ft6336_touch.h"          // FT6336 capacitive touch over I2C
+#include "ds3231_rtc.h"            // DS3231 RTC over the same I2C bus (optional)
 #endif
 #if defined(CONFIG_IDF_TARGET_ESP32C5)
 #include "esp_wifi.h"              // esp_wifi_set_band_mode() — C5 is dual-band 2.4/5 GHz
@@ -1444,6 +1445,7 @@ int clockHour = DEFAULT_CLOCK_HOUR;
 int clockMinute = DEFAULT_CLOCK_MINUTE;
 unsigned long clockLastMinuteMs = 0;
 ClockField activeClockField = CLOCK_FIELD_HOUR;
+bool rtcPresent = false;   // DS3231 detected on the I2C bus (optional hardware)
 
 bool wifiPanelOpen = false;
 WifiPanelMode wifiPanelMode = WIFI_PANEL_MAIN;
@@ -2418,6 +2420,7 @@ void adjustClockField(int delta) {
   normalizeClockDate();
   resetClockTick();
   markSettingsDirty();
+  if (rtcPresent) ds3231_write_time(clockYear, clockMonth, clockDay, clockHour, clockMinute, 0);
 }
 
 const char* clockFieldName() {
@@ -3808,6 +3811,9 @@ bool syncClockFromSystemTime(bool markDirty) {
   clockLastMinuteMs = (now > secondOffsetMs) ? (now - secondOffsetMs) : now;
   wifiTimeSynced = true;
   wifiLastNtpSyncMs = now;
+  if (rtcPresent) {
+    ds3231_write_time(clockYear, clockMonth, clockDay, clockHour, clockMinute, timeInfo.tm_sec);
+  }
   if (markDirty) markSettingsDirty();
   return true;
 }
@@ -7829,6 +7835,33 @@ void setup() {
   lastSettingsSaveMs = lastMs;
   fpsTimer = lastMs;
   frameCount = 0;
+
+#if defined(AQUARIUM_BOARD_PANCAKE)
+  // Optional DS3231 on the shared touch I2C bus (SDA=9/SCL=10, addr 0x68).
+  // If present and its battery held time through the outage, seed the clock
+  // from it — this beats the NVS-saved manual time (which is whatever was
+  // set before the last power-off) and covers boots with no Wi-Fi. Net mode
+  // (NTP), if enabled, will still override this once it connects, and will
+  // write the corrected time back to the RTC (see syncClockFromSystemTime).
+  rtcPresent = ds3231_init();
+  if (rtcPresent && !ds3231_lost_power()) {
+    int y, mo, d, h, mi, s;
+    if (ds3231_read_time(&y, &mo, &d, &h, &mi, &s)) {
+      clockYear = y;
+      clockMonth = mo;
+      clockDay = d;
+      clockHour = h;
+      clockMinute = mi;
+      normalizeClockDate();
+      unsigned long secondOffsetMs = (unsigned long)clampVal(s, 0, 59) * 1000UL;
+      clockLastMinuteMs = (lastMs > secondOffsetMs) ? (lastMs - secondOffsetMs) : lastMs;
+      markSettingsDirty();
+      Serial.printf("[RTC] Loaded %04d-%02d-%02d %02d:%02d:%02d\n", y, mo, d, h, mi, s);
+    }
+  } else if (rtcPresent) {
+    Serial.println("[RTC] Lost power (dead/missing battery) — keeping saved time until manual or Net sync");
+  }
+#endif
 }
 
 void loop() {
