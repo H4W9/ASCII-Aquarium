@@ -1425,6 +1425,17 @@ bool clockUseInternetTime = false;
 ClockDisplayStyle clockDisplayStyle = CLOCK_STYLE_SMALL_TEXT;
 ClockSmallPosition clockSmallPosition = CLOCK_SMALL_TOP;
 int asciiClockFontIndex = DEFAULT_ASCII_CLOCK_FONT_INDEX;
+// Clock size multiplier, driven by pinch-to-zoom and persisted to NVS. 1 is the
+// smallest (the original size); higher values scale only the clock, nothing else.
+static const uint8_t CLOCK_ZOOM_MIN = 1;
+static const uint8_t CLOCK_ZOOM_MAX = 4;
+uint8_t clockZoom = CLOCK_ZOOM_MIN;
+#if defined(AQUARIUM_BOARD_PANCAKE)
+bool clockPinchActive = false;       // two fingers currently down
+bool clockPinchSuppressTap = false;  // swallow taps until all fingers lift after a pinch
+float clockPinchStartDist = 1.0f;    // finger spread when the pinch began
+float clockPinchStartZoom = 1.0f;    // clockZoom when the pinch began
+#endif
 bool clockStylePanelOpen = false;
 bool clockColorPanelOpen = false;
 bool backgroundColorPanelOpen = false;
@@ -3512,6 +3523,7 @@ void savePersistentState() {
   prefs.putUChar("clk_style", (uint8_t)clockDisplayStyle);
   prefs.putUChar("clk_pos", (uint8_t)clockSmallPosition);
   prefs.putUChar("clk_font", (uint8_t)asciiClockFontIndex);
+  prefs.putUChar("clk_zoom", clockZoom);
   prefs.putBool("clk_flip", clockFlipHorizontal);
   prefs.putUShort("clk_s_col", clockSmallTextColor);
   prefs.putUShort("clk_a_col", clockAsciiTextColor);
@@ -3599,6 +3611,7 @@ void loadPersistentState() {
     clockDisplayStyle = (ClockDisplayStyle)prefs.getUChar("clk_style", (uint8_t)CLOCK_STYLE_SMALL_TEXT);
     clockSmallPosition = (ClockSmallPosition)prefs.getUChar("clk_pos", (uint8_t)CLOCK_SMALL_TOP);
     asciiClockFontIndex = prefs.getUChar("clk_font", DEFAULT_ASCII_CLOCK_FONT_INDEX);
+    clockZoom = clampVal((int)prefs.getUChar("clk_zoom", CLOCK_ZOOM_MIN), (int)CLOCK_ZOOM_MIN, (int)CLOCK_ZOOM_MAX);
     clockFlipHorizontal = prefs.getBool("clk_flip", false);
     clockSmallTextColor = prefs.getUShort("clk_s_col", DEFAULT_SMALL_CLOCK_COLOR);
     clockAsciiTextColor = prefs.getUShort("clk_a_col", DEFAULT_ASCII_CLOCK_COLOR);
@@ -5466,13 +5479,15 @@ void drawAsciiClockBackground(TFT_eSprite& s) {
   formatClockTimeOnly(timeText, sizeof(timeText), false);
   const AsciiClockFont& font = currentAsciiClockFont();
   int artCols = asciiClockTextCols(timeText, font);
-  int artPixelW = artCols * ASCII_CLOCK_CHAR_W;
+  int charW = ASCII_CLOCK_CHAR_W * clockZoom;   // pinch-to-zoom scales only the clock
+  int rowH = ASCII_CLOCK_ROW_H * clockZoom;
+  int artPixelW = artCols * charW;
   int x = (SCREEN_W - artPixelW) / 2;
   if (x < 0) x = 0;
   int y = ASCII_CLOCK_Y;
 
   s.setTextFont(1);
-  s.setTextSize(1);
+  s.setTextSize(clockZoom);
   s.setTextDatum(TL_DATUM);
   s.setTextColor(currentAsciiClockTextColor());
 
@@ -5488,14 +5503,18 @@ void drawAsciiClockBackground(TFT_eSprite& s) {
       mirrorClockTextInPlace(rowBuf);
     }
     trimTrailingSpaces(rowBuf);
-    if (rowBuf[0] != '\0') s.drawString(rowBuf, x, y + row * ASCII_CLOCK_ROW_H);
+    if (rowBuf[0] != '\0') s.drawString(rowBuf, x, y + row * rowH);
   }
 
   s.setTextFont(2);
+  s.setTextSize(1);
 }
 
 void drawMirroredSmallClock(TFT_eSprite& s, const char* line, int y) {
-  if (!clockFlipSpriteReady) {
+  // The pixel-mirror sprite is a fixed 192x20 and can't hold zoomed text, so at
+  // zoom > 1 fall back to a character-order mirror that scales at any text size
+  // (s already has the zoom applied by drawClock).
+  if (!clockFlipSpriteReady || clockZoom > 1) {
     char fallback[32];
     copySafe(fallback, sizeof(fallback), line);
     mirrorClockTextInPlace(fallback);
@@ -5533,15 +5552,16 @@ void drawClock(TFT_eSprite& s) {
   if (!clockVisible || clockDisplayStyle != CLOCK_STYLE_SMALL_TEXT) return;
   char line[32];
   formatClockDisplay(line, sizeof(line));
-  s.setTextSize(1);
+  s.setTextSize(clockZoom);            // pinch-to-zoom scales only the clock
   s.setTextDatum(TC_DATUM);
   s.setTextColor(currentSmallClockTextColor());
-  int y = (clockSmallPosition == CLOCK_SMALL_TOP) ? 4 : (SCREEN_H - 18);
+  int y = (clockSmallPosition == CLOCK_SMALL_TOP) ? 4 : (SCREEN_H - 18 * clockZoom);
   if (clockFlipHorizontal) {
     drawMirroredSmallClock(s, line, y);
   } else {
     s.drawString(line, SCREEN_W / 2, y);
   }
+  s.setTextSize(1);                    // restore for everything else
 }
 
 bool hudButtonFlashActive(unsigned long untilMs) {
@@ -7258,7 +7278,55 @@ void handleCreaturesPanelTouch(int x, int y) {
   }
 }
 
+#if defined(AQUARIUM_BOARD_PANCAKE)
+// Two-finger pinch scales only the clock. Returns true when the gesture consumes
+// this frame's touch (so the normal tap/feed logic is skipped). The new size is
+// saved to NVS when the pinch ends.
+bool handleClockPinch() {
+  uint16_t rx1, ry1, rx2, ry2;
+  uint8_t count = ft6336_read_points(&rx1, &ry1, &rx2, &ry2);
+
+  if (count >= 2) {
+    if (clockVisible) {
+      float dx = (float)rx1 - (float)rx2;
+      float dy = (float)ry1 - (float)ry2;
+      float dist = sqrtf(dx * dx + dy * dy);
+      if (!clockPinchActive) {
+        clockPinchActive = true;
+        clockPinchStartDist = (dist > 1.0f) ? dist : 1.0f;
+        clockPinchStartZoom = (float)clockZoom;
+      } else {
+        int nz = (int)lroundf(clockPinchStartZoom * (dist / clockPinchStartDist));
+        clockZoom = (uint8_t)clampVal(nz, (int)CLOCK_ZOOM_MIN, (int)CLOCK_ZOOM_MAX);
+      }
+    }
+    clockPinchSuppressTap = true;
+    touchWasDown = true;   // never let a pinch register as a tap/feed
+    return true;
+  }
+
+  // Fewer than two fingers now.
+  if (clockPinchActive) {
+    clockPinchActive = false;
+    markSettingsDirty();   // persist the new zoom (deferred NVS write)
+  }
+  if (clockPinchSuppressTap) {
+    if (count == 0) {      // all fingers lifted — resume normal handling next frame
+      clockPinchSuppressTap = false;
+      touchWasDown = false;
+      return false;
+    }
+    touchWasDown = true;   // a finger lingers after the pinch — keep swallowing taps
+    return true;
+  }
+  return false;
+}
+#endif
+
 void processTouch() {
+#if defined(AQUARIUM_BOARD_PANCAKE)
+  if (handleClockPinch()) return;
+#endif
   int x, y;
   if (!readTouchPoint(x, y)) {
     touchWasDown = false;

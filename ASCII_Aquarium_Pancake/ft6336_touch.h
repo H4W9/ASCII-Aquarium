@@ -77,4 +77,23 @@ static uint8_t ft6336_read_raw(uint16_t *raw_x, uint16_t *raw_y) {
   return 1;
 }
 
+// Reads up to two raw touch points (panel-native portrait). Returns the number
+// of active points (0, 1 or 2). Point 2 is only written when the return is >= 2.
+// The FT6336 lays the points out contiguously from TD_STATUS:
+//   [0]=count [1..4]=P1 XH,XL,YH,YL [5..6]=weight/misc [7..10]=P2 XH,XL,YH,YL
+static uint8_t ft6336_read_points(uint16_t *x1, uint16_t *y1,
+                                  uint16_t *x2, uint16_t *y2) {
+  uint8_t data[13];
+  if (!_ft6336_read(FT6336_TD_STATUS, data, 13)) return 0;
+  uint8_t count = data[0] & 0x0F;
+  if (count == 0) return 0;
+  *x1 = ((uint16_t)(data[1] & 0x0F) << 8) | data[2];
+  *y1 = ((uint16_t)(data[3] & 0x0F) << 8) | data[4];
+  if (count >= 2) {
+    *x2 = ((uint16_t)(data[7] & 0x0F) << 8) | data[8];
+    *y2 = ((uint16_t)(data[9] & 0x0F) << 8) | data[10];
+  }
+  return count;
+}
+
 #endif // ft6336_touch_h

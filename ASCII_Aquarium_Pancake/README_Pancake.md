@@ -126,6 +126,18 @@ v<version>-pancake      →   v2.39-pancake
 Change `TAG=` in the workflow's *Create / refresh release* step if you want a
 different scheme.
 
+## Clock pinch-to-zoom
+
+When the clock is showing, a **two-finger pinch** scales the clock — and only the
+clock — larger or smaller. The current (original) size is the smallest allowed;
+pinch out to enlarge it. The chosen size persists across reboots (NVS key
+`clk_zoom`) and applies to both the small-text and large ASCII clock styles.
+
+- Range is `CLOCK_ZOOM_MIN`..`CLOCK_ZOOM_MAX` (1..4) — integer multipliers of the
+  base text size; adjust `CLOCK_ZOOM_MAX` near the top of the `.ino` for more.
+- Uses the FT6336's second touch point (`ft6336_read_points()`); a pinch never
+  registers as a tap/feed. Pinch is a no-op when the clock is hidden.
+
 ## Touch orientation tuning
 
 The FT6336 reports coordinates in the panel's native portrait frame; the sketch
