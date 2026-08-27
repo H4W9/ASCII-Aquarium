@@ -1,4 +1,4 @@
-// ASCII_Aquarium_Pancake.ino | Version: v2.40 (Marauder Pancake port)
+// ASCII_Aquarium_Pancake.ino | Version: v2.41 (Marauder Pancake port)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Board profile. This file is the Marauder Pancake port:
@@ -60,7 +60,7 @@
 */
 
 /** Shown run label in HUD title (must match line-1 banner when you release builds). */
-static constexpr const char* kSketchVersionLabel = "v2.40";
+static constexpr const char* kSketchVersionLabel = "v2.41";
 
 #if defined(AQUARIUM_BOARD_PANCAKE)
 static constexpr const char* kBoardProfileName = "Marauder Pancake";
