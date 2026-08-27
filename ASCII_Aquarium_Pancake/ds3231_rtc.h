@@ -8,12 +8,22 @@
 //   C  SCL  -> GPIO 10
 //   NC      -> leave empty
 //   -  GND  -> GND
+//
+// Storage convention: the chip holds UTC — the same convention used by the
+// M5PORKCHOP firmware's rtc_ds3231.cpp on this same hardware. The Pancake
+// Launcher does not read or write this chip at all (checked: no RTC driver
+// on the pancake board target), so it's a non-issue for it either way. The
+// Pancake's Wi-Fi/manual "timezone" setting only affects how UTC is
+// displayed, never how it's stored, so the module reads the same on
+// whichever firmware boots next. Callers convert to/from local time
+// themselves (localtime_r / mktime) around ds3231_read_utc/ds3231_write_utc.
 #pragma once
 #ifndef ds3231_rtc_h
 #define ds3231_rtc_h
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <time.h>
 
 #ifndef RTC_SDA
 #define RTC_SDA 9
@@ -29,7 +39,18 @@
 
 static uint8_t _ds3231_bcd2dec(uint8_t v) { return (uint8_t)(((v >> 4) * 10) + (v & 0x0F)); }
 static uint8_t _ds3231_dec2bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
-static int _ds3231_clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Days since 1970-01-01 for a civil UTC Y/M/D (Howard Hinnant's algorithm) —
+// same routine M5PORKCHOP's rtc_ds3231.cpp uses, so both drivers agree on
+// the exact same epoch math for whatever they read/write to this chip.
+static long _ds3231_days_from_civil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+  unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
 
 static bool _ds3231_read(uint8_t reg, uint8_t *buf, uint8_t len) {
   Wire.beginTransmission(DS3231_ADDR);
@@ -75,31 +96,50 @@ static void ds3231_clear_lost_power_flag() {
   _ds3231_write(DS3231_REG_STATUS, &status, 1);
 }
 
-// Reads wall-clock time. Module is always run in 24-hour mode. Returns
-// false on I2C failure.
-static bool ds3231_read_time(int *year, int *month, int *day, int *hour, int *minute, int *second) {
+// Reads the chip's stored UTC time as an epoch. Module is always run in
+// 24-hour mode. Returns false on I2C failure or an out-of-range reading
+// (unset/corrupt chip).
+static bool ds3231_read_utc(time_t *utcOut) {
   uint8_t d[7];
   if (!_ds3231_read(DS3231_REG_SECONDS, d, 7)) return false;
-  *second = _ds3231_bcd2dec(d[0] & 0x7F);
-  *minute = _ds3231_bcd2dec(d[1] & 0x7F);
-  *hour   = _ds3231_bcd2dec(d[2] & 0x3F);   // bit6=0 → 24h mode
-  *day    = _ds3231_bcd2dec(d[4] & 0x3F);
-  *month  = _ds3231_bcd2dec(d[5] & 0x1F);
-  *year   = 2000 + _ds3231_bcd2dec(d[6]);
+
+  uint8_t sec   = _ds3231_bcd2dec(d[0] & 0x7F);
+  uint8_t min   = _ds3231_bcd2dec(d[1] & 0x7F);
+  uint8_t hour;
+  if (d[2] & 0x40) {                                // 12-hour mode (set by some other tool)
+    hour = _ds3231_bcd2dec(d[2] & 0x1F) % 12;
+    if (d[2] & 0x20) hour += 12;                    // PM bit
+  } else {                                          // 24-hour mode (how we write it)
+    hour = _ds3231_bcd2dec(d[2] & 0x3F);
+  }
+  uint8_t day   = _ds3231_bcd2dec(d[4] & 0x3F);
+  uint8_t month = _ds3231_bcd2dec(d[5] & 0x1F);      // ignore century bit
+  int     year  = 2000 + _ds3231_bcd2dec(d[6]);
+
+  if (month < 1 || month > 12 || day < 1 || day > 31 ||
+      hour > 23 || min > 59 || sec > 59 || year < 2024) {
+    return false;                                    // unset / corrupt reading
+  }
+
+  long days = _ds3231_days_from_civil(year, (unsigned)month, (unsigned)day);
+  *utcOut = (time_t)days * 86400L + hour * 3600L + min * 60L + sec;
   return true;
 }
 
-// Writes wall-clock time and clears the lost-power flag so future reads
-// are trusted again. dow is 1-7 (arbitrary — the sketch doesn't use it).
-static bool ds3231_write_time(int year, int month, int day, int hour, int minute, int second, int dow = 1) {
+// Writes a UTC epoch into the chip and clears the lost-power flag so future
+// reads are trusted again.
+static bool ds3231_write_utc(time_t utc) {
+  struct tm tmv;
+  gmtime_r(&utc, &tmv);
+
   uint8_t d[7];
-  d[0] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(second, 0, 59));
-  d[1] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(minute, 0, 59));
-  d[2] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(hour, 0, 23));    // 24h mode, bit6=0
-  d[3] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(dow, 1, 7));
-  d[4] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(day, 1, 31));
-  d[5] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(month, 1, 12));
-  d[6] = _ds3231_dec2bcd((uint8_t)_ds3231_clamp(year - 2000, 0, 99));
+  d[0] = _ds3231_dec2bcd((uint8_t)tmv.tm_sec);
+  d[1] = _ds3231_dec2bcd((uint8_t)tmv.tm_min);
+  d[2] = _ds3231_dec2bcd((uint8_t)tmv.tm_hour);          // 24h mode, bit6=0
+  d[3] = (uint8_t)(tmv.tm_wday + 1);                     // DS3231 day-of-week 1..7
+  d[4] = _ds3231_dec2bcd((uint8_t)tmv.tm_mday);
+  d[5] = _ds3231_dec2bcd((uint8_t)(tmv.tm_mon + 1));     // century bit7=0 (20xx)
+  d[6] = _ds3231_dec2bcd((uint8_t)((tmv.tm_year + 1900) - 2000));
   if (!_ds3231_write(DS3231_REG_SECONDS, d, 7)) return false;
   ds3231_clear_lost_power_flag();
   return true;

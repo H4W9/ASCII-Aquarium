@@ -2420,7 +2420,20 @@ void adjustClockField(int delta) {
   normalizeClockDate();
   resetClockTick();
   markSettingsDirty();
-  if (rtcPresent) ds3231_write_time(clockYear, clockMonth, clockDay, clockHour, clockMinute, 0);
+  if (rtcPresent) {
+    // clockYear/etc. are wall-clock in the currently selected timezone;
+    // mktime() reads a struct tm as local time per the active TZ env var
+    // (kept current by applyConfiguredTimezone()) and returns UTC epoch.
+    struct tm localTm = {};
+    localTm.tm_year = clockYear - 1900;
+    localTm.tm_mon = clockMonth - 1;
+    localTm.tm_mday = clockDay;
+    localTm.tm_hour = clockHour;
+    localTm.tm_min = clockMinute;
+    localTm.tm_sec = 0;
+    localTm.tm_isdst = -1;
+    ds3231_write_utc(mktime(&localTm));
+  }
 }
 
 const char* clockFieldName() {
@@ -2630,10 +2643,21 @@ const TimezoneOption& currentTimezone() {
   return timezoneOptions[timezoneIndex];
 }
 
+// Points the C library's local-time conversion (localtime_r/mktime) at the
+// currently selected timezone. configTzTime() does this too, but only when
+// Wi-Fi/NTP actually runs; this keeps manual-mode RTC round-trips correct
+// even when the device is never connected.
+void applyConfiguredTimezone() {
+  const TimezoneOption& tz = currentTimezone();
+  setenv("TZ", tz.posix, 1);
+  tzset();
+}
+
 void cycleTimezone(int delta) {
   timezoneIndex += delta;
   if (timezoneIndex < 0) timezoneIndex = TIMEZONE_COUNT - 1;
   if (timezoneIndex >= TIMEZONE_COUNT) timezoneIndex = 0;
+  applyConfiguredTimezone();
   wifiTimeConfigured = false;
   wifiTimeSynced = false;
   if (clockUseInternetTime && wifiConnected) {
@@ -3812,7 +3836,10 @@ bool syncClockFromSystemTime(bool markDirty) {
   wifiTimeSynced = true;
   wifiLastNtpSyncMs = now;
   if (rtcPresent) {
-    ds3231_write_time(clockYear, clockMonth, clockDay, clockHour, clockMinute, timeInfo.tm_sec);
+    // System clock's epoch is UTC regardless of the TZ env var (TZ only
+    // affects getLocalTime()'s formatting above), so this is already the
+    // right value to hand to the chip.
+    ds3231_write_utc(time(nullptr));
   }
   if (markDirty) markSettingsDirty();
   return true;
@@ -7838,25 +7865,33 @@ void setup() {
 
 #if defined(AQUARIUM_BOARD_PANCAKE)
   // Optional DS3231 on the shared touch I2C bus (SDA=9/SCL=10, addr 0x68).
-  // If present and its battery held time through the outage, seed the clock
-  // from it — this beats the NVS-saved manual time (which is whatever was
-  // set before the last power-off) and covers boots with no Wi-Fi. Net mode
-  // (NTP), if enabled, will still override this once it connects, and will
-  // write the corrected time back to the RTC (see syncClockFromSystemTime).
+  // The chip stores UTC (matching M5PORKCHOP/Launcher on this same
+  // hardware — see ds3231_rtc.h), so convert to local using the persisted
+  // timezone before seeding the on-screen clock fields. If present and its
+  // battery held time through the outage, this beats the NVS-saved manual
+  // time (whatever was set before the last power-off) and covers boots with
+  // no Wi-Fi. Net mode (NTP), if enabled, still overrides this once it
+  // connects, and writes the corrected UTC back to the RTC (see
+  // syncClockFromSystemTime).
+  applyConfiguredTimezone();
   rtcPresent = ds3231_init();
   if (rtcPresent && !ds3231_lost_power()) {
-    int y, mo, d, h, mi, s;
-    if (ds3231_read_time(&y, &mo, &d, &h, &mi, &s)) {
-      clockYear = y;
-      clockMonth = mo;
-      clockDay = d;
-      clockHour = h;
-      clockMinute = mi;
+    time_t utcNow;
+    if (ds3231_read_utc(&utcNow)) {
+      struct tm localTm;
+      localtime_r(&utcNow, &localTm);
+      clockYear = localTm.tm_year + 1900;
+      clockMonth = localTm.tm_mon + 1;
+      clockDay = localTm.tm_mday;
+      clockHour = localTm.tm_hour;
+      clockMinute = localTm.tm_min;
       normalizeClockDate();
-      unsigned long secondOffsetMs = (unsigned long)clampVal(s, 0, 59) * 1000UL;
+      unsigned long secondOffsetMs = (unsigned long)clampVal(localTm.tm_sec, 0, 59) * 1000UL;
       clockLastMinuteMs = (lastMs > secondOffsetMs) ? (lastMs - secondOffsetMs) : lastMs;
       markSettingsDirty();
-      Serial.printf("[RTC] Loaded %04d-%02d-%02d %02d:%02d:%02d\n", y, mo, d, h, mi, s);
+      Serial.printf("[RTC] Loaded %04d-%02d-%02d %02d:%02d:%02d local (UTC epoch %lu)\n",
+                    clockYear, clockMonth, clockDay, clockHour, clockMinute, localTm.tm_sec,
+                    (unsigned long)utcNow);
     }
   } else if (rtcPresent) {
     Serial.println("[RTC] Lost power (dead/missing battery) — keeping saved time until manual or Net sync");
