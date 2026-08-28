@@ -129,14 +129,19 @@ different scheme.
 ## Clock pinch-to-zoom
 
 When the clock is showing, a **two-finger pinch** scales the clock — and only the
-clock — larger or smaller. The current (original) size is the smallest allowed;
-pinch out to enlarge it. The chosen size persists across reboots (NVS key
-`clk_zoom`) and applies to both the small-text and large ASCII clock styles.
+clock — larger or smaller. The size persists across reboots (NVS key `clk_zoom`)
+and applies to both the small-text and large ASCII clock styles.
 
-- Range is `CLOCK_ZOOM_MIN`..`CLOCK_ZOOM_MAX` (1..4) — integer multipliers of the
-  base text size; adjust `CLOCK_ZOOM_MAX` near the top of the `.ino` for more.
-- Uses the FT6336's second touch point (`ft6336_read_points()`); a pinch never
-  registers as a tap/feed. Pinch is a no-op when the clock is hidden.
+- **Notches:** `CLOCK_ZOOM_NOTCHES` (5) discrete steps from `CLOCK_ZOOM_MIN_SCALE`
+  (1.0× = original, the smallest) to `CLOCK_ZOOM_MAX_SCALE` (2.0× = biggest), i.e.
+  1.00 / 1.25 / 1.50 / 1.75 / 2.00. Adjust those constants near the top of the `.ino`.
+- **Fractional scaling:** `setTextSize` is integer-only, so the small-text clock is
+  rendered once at 1× into the reusable clock sprite and **nearest-neighbour blitted**
+  at the notch's scale (`drawSmallClockScaled`). The ASCII art clock, already large,
+  uses the nearest integer size (1× or 2×).
+- Uses the FT6336's second touch point (`ft6336_read_points()`); the finger spread
+  snaps to the nearest notch. A pinch never registers as a tap/feed, and is a no-op
+  when the clock is hidden.
 
 ## Touch orientation tuning
 

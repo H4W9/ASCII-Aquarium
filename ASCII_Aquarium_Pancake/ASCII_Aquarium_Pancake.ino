@@ -1425,16 +1425,24 @@ bool clockUseInternetTime = false;
 ClockDisplayStyle clockDisplayStyle = CLOCK_STYLE_SMALL_TEXT;
 ClockSmallPosition clockSmallPosition = CLOCK_SMALL_TOP;
 int asciiClockFontIndex = DEFAULT_ASCII_CLOCK_FONT_INDEX;
-// Clock size multiplier, driven by pinch-to-zoom and persisted to NVS. 1 is the
-// smallest (the original size); higher values scale only the clock, nothing else.
-static const uint8_t CLOCK_ZOOM_MIN = 1;
-static const uint8_t CLOCK_ZOOM_MAX = 4;
-uint8_t clockZoom = CLOCK_ZOOM_MIN;
+// Clock size, driven by pinch-to-zoom and persisted to NVS. Zoom scales only the
+// clock, nothing else. Notch 0 is the original (smallest) size; the top notch is
+// the biggest allowed (2x the original, which used to be a single size step), with
+// finer notches evenly filling the range between. Scaling is fractional, so it is
+// applied by nearest-neighbour blit rather than setTextSize (which is integer-only).
+static const uint8_t CLOCK_ZOOM_NOTCHES = 5;      // 1.00, 1.25, 1.50, 1.75, 2.00
+static const float CLOCK_ZOOM_MIN_SCALE = 1.0f;   // notch 0 = original
+static const float CLOCK_ZOOM_MAX_SCALE = 2.0f;   // top notch = biggest allowed
+uint8_t clockZoomNotch = 0;
+float clockZoomScale() {
+  return CLOCK_ZOOM_MIN_SCALE +
+         (CLOCK_ZOOM_MAX_SCALE - CLOCK_ZOOM_MIN_SCALE) * clockZoomNotch / (CLOCK_ZOOM_NOTCHES - 1);
+}
 #if defined(AQUARIUM_BOARD_PANCAKE)
 bool clockPinchActive = false;       // two fingers currently down
 bool clockPinchSuppressTap = false;  // swallow taps until all fingers lift after a pinch
 float clockPinchStartDist = 1.0f;    // finger spread when the pinch began
-float clockPinchStartZoom = 1.0f;    // clockZoom when the pinch began
+float clockPinchStartScale = 1.0f;   // clock scale when the pinch began
 #endif
 bool clockStylePanelOpen = false;
 bool clockColorPanelOpen = false;
@@ -1533,7 +1541,11 @@ unsigned long frameCount = 0;
 float fps = 0.0f;
 
 unsigned long lastTouchMs = 0;
-const unsigned long TOUCH_DEBOUNCE_MS = 160;
+#if defined(AQUARIUM_BOARD_PANCAKE)
+const unsigned long TOUCH_DEBOUNCE_MS = 45;   // FT6336 cap touch is clean — keep it snappy
+#else
+const unsigned long TOUCH_DEBOUNCE_MS = 160;  // resistive panels need more debounce
+#endif
 static const unsigned long HUD_BUTTON_FLASH_MS = 180;
 bool touchWasDown = false;
 bool spriteReady = false;
@@ -3523,7 +3535,7 @@ void savePersistentState() {
   prefs.putUChar("clk_style", (uint8_t)clockDisplayStyle);
   prefs.putUChar("clk_pos", (uint8_t)clockSmallPosition);
   prefs.putUChar("clk_font", (uint8_t)asciiClockFontIndex);
-  prefs.putUChar("clk_zoom", clockZoom);
+  prefs.putUChar("clk_zoom", clockZoomNotch);
   prefs.putBool("clk_flip", clockFlipHorizontal);
   prefs.putUShort("clk_s_col", clockSmallTextColor);
   prefs.putUShort("clk_a_col", clockAsciiTextColor);
@@ -3611,7 +3623,7 @@ void loadPersistentState() {
     clockDisplayStyle = (ClockDisplayStyle)prefs.getUChar("clk_style", (uint8_t)CLOCK_STYLE_SMALL_TEXT);
     clockSmallPosition = (ClockSmallPosition)prefs.getUChar("clk_pos", (uint8_t)CLOCK_SMALL_TOP);
     asciiClockFontIndex = prefs.getUChar("clk_font", DEFAULT_ASCII_CLOCK_FONT_INDEX);
-    clockZoom = clampVal((int)prefs.getUChar("clk_zoom", CLOCK_ZOOM_MIN), (int)CLOCK_ZOOM_MIN, (int)CLOCK_ZOOM_MAX);
+    clockZoomNotch = (uint8_t)clampVal((int)prefs.getUChar("clk_zoom", 0), 0, (int)CLOCK_ZOOM_NOTCHES - 1);
     clockFlipHorizontal = prefs.getBool("clk_flip", false);
     clockSmallTextColor = prefs.getUShort("clk_s_col", DEFAULT_SMALL_CLOCK_COLOR);
     clockAsciiTextColor = prefs.getUShort("clk_a_col", DEFAULT_ASCII_CLOCK_COLOR);
@@ -5479,15 +5491,18 @@ void drawAsciiClockBackground(TFT_eSprite& s) {
   formatClockTimeOnly(timeText, sizeof(timeText), false);
   const AsciiClockFont& font = currentAsciiClockFont();
   int artCols = asciiClockTextCols(timeText, font);
-  int charW = ASCII_CLOCK_CHAR_W * clockZoom;   // pinch-to-zoom scales only the clock
-  int rowH = ASCII_CLOCK_ROW_H * clockZoom;
+  // The ASCII art clock is already large; scale it by the nearest integer of the
+  // zoom factor (1x or 2x) rather than fractionally.
+  int asciiSize = clampVal((int)lroundf(clockZoomScale()), 1, 2);
+  int charW = ASCII_CLOCK_CHAR_W * asciiSize;   // pinch-to-zoom scales only the clock
+  int rowH = ASCII_CLOCK_ROW_H * asciiSize;
   int artPixelW = artCols * charW;
   int x = (SCREEN_W - artPixelW) / 2;
   if (x < 0) x = 0;
   int y = ASCII_CLOCK_Y;
 
   s.setTextFont(1);
-  s.setTextSize(clockZoom);
+  s.setTextSize(asciiSize);
   s.setTextDatum(TL_DATUM);
   s.setTextColor(currentAsciiClockTextColor());
 
@@ -5510,18 +5525,16 @@ void drawAsciiClockBackground(TFT_eSprite& s) {
   s.setTextSize(1);
 }
 
-void drawMirroredSmallClock(TFT_eSprite& s, const char* line, int y) {
-  // The pixel-mirror sprite is a fixed 192x20 and can't hold zoomed text, so at
-  // zoom > 1 fall back to a character-order mirror that scales at any text size
-  // (s already has the zoom applied by drawClock).
-  if (!clockFlipSpriteReady || clockZoom > 1) {
-    char fallback[32];
-    copySafe(fallback, sizeof(fallback), line);
-    mirrorClockTextInPlace(fallback);
-    s.setTextDatum(TC_DATUM);
-    s.drawString(fallback, SCREEN_W / 2, y);
-    return;
-  }
+// Base (unscaled) height of the small clock text, used to place the bottom clock.
+static const int SMALL_CLOCK_BASE_H = 16;   // font 2 at size 1
+
+// Draws the small clock centred at `yTop`, scaled by float `scale` (1.0 = original),
+// mirrored when clockFlipHorizontal is set. Renders once into the reusable flip
+// sprite at 1x, then nearest-neighbour blits it to the canvas — this gives smooth
+// fractional zoom notches that setTextSize (integer only) can't. Returns false if
+// the scratch sprite isn't available (caller falls back to plain drawString).
+bool drawSmallClockScaled(TFT_eSprite& s, const char* line, int yTop, float scale) {
+  if (!clockFlipSpriteReady) return false;
 
   clockFlipSprite.setTextFont(2);
   clockFlipSprite.setTextSize(1);
@@ -5532,36 +5545,57 @@ void drawMirroredSmallClock(TFT_eSprite& s, const char* line, int y) {
   clockFlipSprite.drawString(line, 0, 0);
 
   int textW = clockFlipSprite.textWidth(line);
-  if (textW <= 0) return;
-  int drawW = clampVal(textW, 1, CLOCK_FLIP_SPRITE_W);
-  int destX = (SCREEN_W - drawW) / 2;
+  if (textW <= 0) return true;
+  int srcW = clampVal(textW, 1, CLOCK_FLIP_SPRITE_W);
+  int srcH = clampVal(SMALL_CLOCK_BASE_H, 1, CLOCK_FLIP_SPRITE_H);
 
-  for (int py = 0; py < CLOCK_FLIP_SPRITE_H; ++py) {
-    int destY = y + py;
-    if (destY < 0 || destY >= SCREEN_H) continue;
-    for (int px = 0; px < drawW; ++px) {
-      uint16_t color = clockFlipSprite.readPixel(px, py);
-      if (color != transparentKey) {
-        s.drawPixel(destX + drawW - 1 - px, destY, color);
-      }
+  int outW = (int)(srcW * scale + 0.5f);
+  int outH = (int)(srcH * scale + 0.5f);
+  if (outW < 1) outW = 1;
+  if (outH < 1) outH = 1;
+  int destX = (SCREEN_W - outW) / 2;
+
+  for (int dy = 0; dy < outH; ++dy) {
+    int py = yTop + dy;
+    if (py < 0 || py >= SCREEN_H) continue;
+    int sy = (int)(dy / scale);
+    if (sy >= srcH) sy = srcH - 1;
+    for (int dx = 0; dx < outW; ++dx) {
+      int px = destX + dx;
+      if (px < 0 || px >= SCREEN_W) continue;
+      int sx = (int)(dx / scale);
+      if (sx >= srcW) sx = srcW - 1;
+      int readX = clockFlipHorizontal ? (srcW - 1 - sx) : sx;
+      uint16_t color = clockFlipSprite.readPixel(readX, sy);
+      if (color != transparentKey) s.drawPixel(px, py, color);
     }
   }
+  return true;
 }
 
 void drawClock(TFT_eSprite& s) {
   if (!clockVisible || clockDisplayStyle != CLOCK_STYLE_SMALL_TEXT) return;
   char line[32];
   formatClockDisplay(line, sizeof(line));
-  s.setTextSize(clockZoom);            // pinch-to-zoom scales only the clock
+  float scale = clockZoomScale();
+  int scaledH = (int)(SMALL_CLOCK_BASE_H * scale + 0.5f);
+  int y = (clockSmallPosition == CLOCK_SMALL_TOP) ? 4 : (SCREEN_H - scaledH - 2);
+
+  if (drawSmallClockScaled(s, line, y, scale)) return;   // fractional (preferred) path
+
+  // Fallback: scratch sprite unavailable — nearest integer size via setTextSize.
+  s.setTextSize(clampVal((int)lroundf(scale), 1, 2));
   s.setTextDatum(TC_DATUM);
   s.setTextColor(currentSmallClockTextColor());
-  int y = (clockSmallPosition == CLOCK_SMALL_TOP) ? 4 : (SCREEN_H - 18 * clockZoom);
   if (clockFlipHorizontal) {
-    drawMirroredSmallClock(s, line, y);
+    char fallback[32];
+    copySafe(fallback, sizeof(fallback), line);
+    mirrorClockTextInPlace(fallback);
+    s.drawString(fallback, SCREEN_W / 2, y);
   } else {
     s.drawString(line, SCREEN_W / 2, y);
   }
-  s.setTextSize(1);                    // restore for everything else
+  s.setTextSize(1);
 }
 
 bool hudButtonFlashActive(unsigned long untilMs) {
@@ -7294,10 +7328,14 @@ bool handleClockPinch() {
       if (!clockPinchActive) {
         clockPinchActive = true;
         clockPinchStartDist = (dist > 1.0f) ? dist : 1.0f;
-        clockPinchStartZoom = (float)clockZoom;
+        clockPinchStartScale = clockZoomScale();
       } else {
-        int nz = (int)lroundf(clockPinchStartZoom * (dist / clockPinchStartDist));
-        clockZoom = (uint8_t)clampVal(nz, (int)CLOCK_ZOOM_MIN, (int)CLOCK_ZOOM_MAX);
+        // Target scale tracks the finger spread, then snaps to the nearest notch.
+        float target = clockPinchStartScale * (dist / clockPinchStartDist);
+        target = clampVal(target, CLOCK_ZOOM_MIN_SCALE, CLOCK_ZOOM_MAX_SCALE);
+        float frac = (target - CLOCK_ZOOM_MIN_SCALE) / (CLOCK_ZOOM_MAX_SCALE - CLOCK_ZOOM_MIN_SCALE);
+        int notch = (int)lroundf(frac * (CLOCK_ZOOM_NOTCHES - 1));
+        clockZoomNotch = (uint8_t)clampVal(notch, 0, (int)CLOCK_ZOOM_NOTCHES - 1);
       }
     }
     clockPinchSuppressTap = true;
